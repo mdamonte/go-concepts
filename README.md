@@ -22,6 +22,7 @@ concurrency/
 ├── race-conditions/ — data race, map race, TOCTOU, publication hazard
 ├── timers/          — Timer, Ticker, time.After, debounce, rate limit, backoff
 ├── atomic/          — Int64, Bool, Value, Pointer, CAS, lock-free patterns
+├── errors/          — sentinel, tipos custom, wrapping %w, Is/As, Join, panic vs error
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -653,6 +654,104 @@ shutdown.Store(true)
 
 ```bash
 cd atomic && go run .
+```
+
+---
+
+### [`errors/`](errors/README.md) — Error Handling
+
+Manejo de errores idiomático en Go: centinelas, tipos custom, wrapping con `%w`,
+`errors.Is/As`, métodos `Is()/As()` personalizados, `errors.Join` y el patrón
+panic vs error.
+
+```go
+// sentinel.go — errores centinela y errors.Is recorriendo la cadena
+var (
+	ErrNotFound   = errors.New("not found")
+	ErrPermission = errors.New("permission denied")
+)
+
+func findUser(id int) (string, error) {
+	switch id {
+	case 1:  return "alice", nil
+	case 2:  return "", ErrPermission
+	default: return "", fmt.Errorf("findUser %d: %w", id, ErrNotFound)
+	}
+}
+
+// errors.Is recorre toda la cadena de Unwrap — no es una comparación ==
+wrapped := fmt.Errorf("service: %w", fmt.Errorf("repo: %w", ErrNotFound))
+fmt.Println(errors.Is(wrapped, ErrNotFound)) // true
+
+// types.go — tipos custom y errors.As
+type ValidationError struct{ Field, Message string }
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation error on %q: %s", e.Field, e.Message)
+}
+
+var valErr *ValidationError
+if errors.As(err, &valErr) {    // extrae el tipo concreto de la cadena
+	fmt.Println(valErr.Field)   // acceso a los campos
+}
+
+// wrapping.go — %w vs %v: %w mantiene la cadena, %v la rompe
+dbErr   := errors.New("connection refused")
+svcErr  := fmt.Errorf("service.GetUser id=42: %w",
+              fmt.Errorf("repo.FindUser: %w", dbErr))
+fmt.Println(errors.Is(svcErr, dbErr))                    // true  — %w
+opaque  := fmt.Errorf("something went wrong: %v", dbErr) // %v rompe la cadena
+fmt.Println(errors.Is(opaque, dbErr))                    // false
+
+// custom_is_as.go — Is() por igualdad semántica (ignora el mensaje)
+type StatusError struct{ Code int; Message string }
+func (e *StatusError) Is(target error) bool {
+	var t *StatusError
+	return errors.As(target, &t) && e.Code == t.Code
+}
+sentinel := &StatusError{Code: 404}
+err1     := &StatusError{Code: 404, Message: "user not found"}
+fmt.Println(errors.Is(err1, sentinel)) // true — mismo código, mensaje diferente
+
+// custom_is_as.go — As() para buscar dentro de un tipo contenedor
+type MultiError struct{ Errors []error }
+func (m *MultiError) As(target any) bool {
+	for _, err := range m.Errors {
+		if errors.As(err, target) { return true }
+	}
+	return false
+}
+
+// join.go — errors.Join (Go 1.20+): combinar múltiples errores
+joined := errors.Join(
+	errors.New("database timeout"),
+	errors.New("cache miss"),
+)
+fmt.Println(joined)                          // database timeout\ncache miss
+fmt.Println(errors.Is(joined, ErrNotFound))  // false
+
+var errs []error
+for _, f := range fields {
+	if f.value == "" {
+		errs = append(errs, &ValidationError{Field: f.name, Message: "required"})
+	}
+}
+if combined := errors.Join(errs...); combined != nil {
+	fmt.Println(combined) // todos los errores de validación de una vez
+}
+
+// patterns.go — panic vs error
+safeDiv := func(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("safeDiv: panic: %v", r)
+		}
+	}()
+	return a / b, nil // panic si b == 0 — convertido en error en el boundary
+}
+```
+
+```bash
+cd errors && go run .
 ```
 
 ---
