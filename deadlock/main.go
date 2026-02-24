@@ -1,61 +1,40 @@
 package main
 
-import (
-	"fmt"
-	"net/http"
-	_ "net/http/pprof"
-	"sync"
-	"time"
-)
+import "fmt"
 
-var (
-	muA sync.Mutex
-	muB sync.Mutex
-)
-
-// goroutine1 locks A first, then tries to lock B.
-func goroutine1(wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	muA.Lock()
-	fmt.Println("goroutine1: locked A")
-	time.Sleep(50 * time.Millisecond) // let goroutine2 lock B first
-
-	fmt.Println("goroutine1: waiting for B...") // will block here forever
-	muB.Lock()
-	defer muB.Unlock()
-	defer muA.Unlock()
-
-	fmt.Println("goroutine1: locked both (unreachable)")
-}
-
-// goroutine2 locks B first, then tries to lock A.
-func goroutine2(wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	muB.Lock()
-	fmt.Println("goroutine2: locked B")
-	time.Sleep(50 * time.Millisecond) // let goroutine1 lock A first
-
-	fmt.Println("goroutine2: waiting for A...") // will block here forever
-	muA.Lock()
-	defer muA.Unlock()
-	defer muB.Unlock()
-
-	fmt.Println("goroutine2: locked both (unreachable)")
-}
-
+// Each demo spawns goroutines into a specific blocking state, prints the
+// goroutine dump so you can see the state label, then cleans up if possible.
+//
+// The final demo (demoMutexDeadlock) triggers the real runtime panic:
+//   fatal error: all goroutines are asleep - deadlock!
+//
+// To inspect live goroutine states before the crash you can also run:
+//   go tool pprof http://localhost:6062/debug/pprof/goroutine?debug=2
 func main() {
-	go func() {
-		fmt.Println("pprof en http://localhost:6062/debug/pprof/")
-		_ = http.ListenAndServe("localhost:6062", nil)
-	}()
+	section("[chan receive] — blocked waiting to receive from a channel")
+	demoChanReceive()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	section("[chan send]    — blocked waiting to send to a channel")
+	demoChanSend()
 
-	go goroutine1(&wg)
-	go goroutine2(&wg)
+	section("[select]       — blocked in select with all cases blocking")
+	demoSelect()
 
-	wg.Wait() // blocks until both goroutines finish — they never will
+	section("[IO wait]      — blocked on network I/O (no data from peer)")
+	demoIOWait()
+
+	section("[running]      — goroutine actively executing (busy loop)")
+	demoRunning()
+
+	section("[semacquire] / [sync.Mutex.Lock] — blocked waiting to acquire a mutex")
+	demoSemacquire()
+
+	section("[semacquire]   — AB deadlock: inconsistent lock ordering")
+	fmt.Println("  Shows complete dump with all accumulated states, then exits with code 1.")
+	fmt.Println("  On a net-free program the runtime itself would print the fatal error.\n")
+	demoMutexDeadlock()
+}
+
+func section(title string) {
+	fmt.Printf("\n━━━ %s ━━━\n", title)
 }
