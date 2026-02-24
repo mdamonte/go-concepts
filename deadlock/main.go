@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"sync"
 	"time"
 )
@@ -44,6 +46,11 @@ func goroutine2(wg *sync.WaitGroup) {
 }
 
 func main() {
+	go func() {
+		fmt.Println("pprof en http://localhost:6062/debug/pprof/")
+		_ = http.ListenAndServe("localhost:6062", nil)
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
