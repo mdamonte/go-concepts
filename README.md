@@ -11,7 +11,7 @@ y programación de sistemas en Go, desde lo más básico hasta patrones de produ
 concurrency/
 ├── main.go          — fan-out con context y timeout (punto de entrada raíz)
 │
-├── deadlock/        — deadlock clásico por orden inconsistente de locks
+├── deadlock/        — todos los estados de bloqueo: chan, select, IO wait, semacquire, running
 ├── stack-vs-heap/   — escape analysis: dónde vive cada variable
 ├── interfaces/      — interfaces: declaración, composición, type switch
 │
@@ -30,46 +30,121 @@ concurrency/
 
 ## Módulos
 
-### [`deadlock/`](deadlock/README.md) — Deadlock
+### [`deadlock/`](deadlock/README.md) — Deadlock & Goroutine States
 
-Deadlock clásico por orden inconsistente de locks. El runtime de Go detecta que
-todos los goroutines están dormidos y panics con `fatal error: all goroutines are asleep`.
+Ejemplos de cada estado de bloqueo visible en un goroutine dump, más el deadlock
+AB clásico. Cada demo llama a `runtime.Stack` para mostrar la etiqueta de estado
+directamente en el terminal — sin necesidad de pprof.
 
 ```go
-var (
-    muA sync.Mutex
-    muB sync.Mutex
-)
+// channel.go — [chan receive]: bloqueado en <-ch sin sender
+func demoChanReceive() {
+	ch := make(chan int) // unbuffered — no sender will ever write
+	go func() {
+		v := <-ch // ← blocked here, shows as [chan receive]
+		fmt.Println("received", v) // unreachable
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines()
+}
 
-// goroutine1 locks A first, then tries to lock B.
+// channel.go — [chan send]: bloqueado en ch <- v sin receiver
+func demoChanSend() {
+	ch := make(chan int) // unbuffered — no receiver will ever read
+	go func() {
+		ch <- 42 // ← blocked here, shows as [chan send]
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines()
+}
+
+// channel.go — [select]: todos los cases bloqueados
+func demoSelect() {
+	ch1 := make(chan int)
+	ch2 := make(chan string)
+	go func() {
+		select {
+		case v := <-ch1: fmt.Println(v) // ← blocked — shows [select], NOT [chan receive]
+		case s := <-ch2: fmt.Println(s) // ← blocked
+		}
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines()
+}
+
+// io.go — [IO wait]: bloqueado en el poller del OS
+// net.Pipe() muestra [select]; se necesita un socket TCP real.
+func demoIOWait() {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	conn, _ := net.Dial("tcp", ln.Addr().String())
+	go func() {
+		buf := make([]byte, 1)
+		conn.Read(buf) // ← blocked inside OS poller, shows as [IO wait]
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines()
+	conn.Close(); ln.Close()
+}
+
+// running.go — [running] / [runnable]: goroutine activo
+func demoRunning() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop: return
+			default:
+				runtime.Gosched() // yields — shows [running] or [runnable]
+			}
+		}
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines() // the goroutine calling this shows [running]
+	close(stop); <-done
+}
+
+// mutex.go — [semacquire] / [sync.Mutex.Lock]: esperando adquirir un mutex
+func demoSemacquire() {
+	var mu sync.Mutex
+	holderReady  := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	go func() {              // holder: acquires and holds
+		mu.Lock()
+		close(holderReady)
+		<-releaseHolder
+		mu.Unlock()
+	}()
+	<-holderReady
+	go func() {
+		mu.Lock() // ← blocked here — shows as [sync.Mutex.Lock]
+		mu.Unlock()
+	}()
+	time.Sleep(80 * time.Millisecond)
+	dumpGoroutines()
+	close(releaseHolder)
+}
+
+// mutex.go — deadlock AB: orden de locks inconsistente
+var muA, muB sync.Mutex
 func goroutine1(wg *sync.WaitGroup) {
-    defer wg.Done()
-    muA.Lock()
-    fmt.Println("goroutine1: locked A")
-    time.Sleep(50 * time.Millisecond) // let goroutine2 lock B first
-
-    fmt.Println("goroutine1: waiting for B...") // will block here forever
-    muB.Lock()
-    defer muB.Unlock()
-    defer muA.Unlock()
+	defer wg.Done()
+	muA.Lock(); time.Sleep(50*time.Millisecond)
+	muB.Lock() // ← blocks forever: goroutine2 holds muB
+	defer muB.Unlock(); defer muA.Unlock()
 }
-
-// goroutine2 locks B first, then tries to lock A.
 func goroutine2(wg *sync.WaitGroup) {
-    defer wg.Done()
-    muB.Lock()
-    fmt.Println("goroutine2: locked B")
-    time.Sleep(50 * time.Millisecond) // let goroutine1 lock A first
-
-    fmt.Println("goroutine2: waiting for A...") // will block here forever
-    muA.Lock()
-    defer muA.Unlock()
-    defer muB.Unlock()
+	defer wg.Done()
+	muB.Lock(); time.Sleep(50*time.Millisecond)
+	muA.Lock() // ← blocks forever: goroutine1 holds muA
+	defer muA.Unlock(); defer muB.Unlock()
 }
+// fatal error: all goroutines are asleep - deadlock!
 ```
 
 ```bash
-go run deadlock/main.go
+cd deadlock && go run .   # muestra todos los estados y sale con exit 1
 ```
 
 ---
