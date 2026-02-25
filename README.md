@@ -23,6 +23,7 @@ concurrency/
 ├── timers/          — Timer, Ticker, time.After, debounce, rate limit, backoff
 ├── atomic/          — Int64, Bool, Value, Pointer, CAS, lock-free patterns
 ├── errors/          — sentinel, tipos custom, wrapping %w, Is/As, Join, panic vs error
+├── generics/        — constraints, funciones genéricas, Stack/Queue/Set, patterns
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -756,6 +757,112 @@ cd errors && go run .
 
 ---
 
+### [`generics/`](generics/README.md) — Generics (Go 1.18+)
+
+Parámetros de tipo, constraints, funciones genéricas y estructuras de datos
+parametrizadas. Incluye todas las limitaciones que suelen aparecer en entrevistas.
+
+```go
+// constraints.go — any, comparable, ~T, uniones, métodos
+
+// any — sin restricción de operaciones
+func Identity[T any](v T) T { return v }
+
+// comparable — permite == y !=, necesario para claves de map
+func Equal[T comparable](a, b T) bool { return a == b }
+
+// ~T — acepta tipos definidos cuyo underlying type sea T
+type Temperature interface{ ~float64 }
+type Celsius float64    // satisface ~float64
+type Fahrenheit float64 // satisface ~float64
+
+func AbsDiff[T Temperature](a, b T) T { ... }
+
+// Union constraint — aritmética sobre todos los tipos numéricos
+type Number interface {
+    ~int | ~int32 | ~int64 | ~float32 | ~float64
+}
+func Sum[T Number](s []T) T { ... }
+```
+
+```go
+// functions.go — Map, Filter, Reduce, Contains, Keys/Values, Must
+func Map[T, U any](s []T, f func(T) U) []U
+func Filter[T any](s []T, f func(T) bool) []T
+func Reduce[T, U any](s []T, init U, f func(U, T) U) U
+func Contains[T comparable](s []T, v T) bool
+func Keys[K comparable, V any](m map[K]V) []K
+func Must[T any](v T, err error) T
+
+squares := Map([]int{1,2,3}, func(n int) string { return fmt.Sprintf("%d²=%d", n, n*n) })
+evens   := Filter([]int{1,2,3,4}, func(n int) bool { return n%2 == 0 })
+sum     := Reduce([]int{1,2,3}, 0, func(acc, n int) int { return acc + n })
+```
+
+```go
+// datastructs.go — estructuras de datos genéricas
+
+type Stack[T any] struct{ items []T }
+func (s *Stack[T]) Push(v T)
+func (s *Stack[T]) Pop() (T, bool)   // zero value + false si vacío
+
+type Queue[T any] struct{ items []T }
+func (q *Queue[T]) Enqueue(v T)
+func (q *Queue[T]) Dequeue() (T, bool)
+
+type Set[T comparable] struct{ m map[T]struct{} }
+func NewSet[T comparable](vals ...T) *Set[T]
+func (s *Set[T]) Union(other *Set[T]) *Set[T]
+func (s *Set[T]) Intersection(other *Set[T]) *Set[T]
+```
+
+```go
+// patterns.go — inferencia, múltiples params, zero value, Result[T], limitaciones
+
+// Inferencia — Go deduce el tipo del argumento
+Double(21)         // Double[int]
+Double(3.14)       // Double[float64]
+Double[int64](7)   // explícito
+
+// Múltiples parámetros de tipo
+type Pair[A, B any] struct{ First A; Second B }
+NewPair("edad", 30)  // Pair[string, int]
+
+// Zero value de T
+func First[T any](s []T) (T, bool) {
+    if len(s) == 0 {
+        var zero T   // 0, "", false, nil — según T
+        return zero, false
+    }
+    return s[0], true
+}
+
+// Result[T] — valor o error encapsulado
+type Result[T any] struct{ Value T; Err error }
+func Ok[T any](v T) Result[T]
+func Err[T any](e error) Result[T]
+
+// Limitación: no se pueden definir métodos genéricos en tipos no genéricos
+type MySlice []int
+// func (s MySlice) Map[U any](f func(int) U) []U { }  // ← INVÁLIDO
+// Solución: función top-level Map(mySlice, f)
+
+// Limitación: type assertion requiere cast previo a any
+func Describe[T any](v T) string {
+    switch x := any(v).(type) {  // any(v) primero, luego .(type)
+    case int:    return fmt.Sprintf("int(%d)", x)
+    case string: return fmt.Sprintf("string(%q)", x)
+    default:     return fmt.Sprintf("%T(%v)", x, x)
+    }
+}
+```
+
+```bash
+cd generics && go run .
+```
+
+---
+
 ### [`worker-pool/`](worker-pool/README.md) — Worker Pool (producción)
 
 Implementación lista para producción: shutdown graceful, propagación de context,
@@ -814,5 +921,7 @@ go test -race ./workerpool/...   # tests con race detector
 7. stack-vs-heap/    → dónde vive la memoria
 8. timers/           → temporización: timers, tickers y patrones
 9. atomic/           → operaciones atómicas y patrones lock-free
-10. worker-pool/     → todo junto en un componente de producción
+10. errors/          → manejo de errores idiomático
+11. generics/        → parámetros de tipo, constraints y estructuras genéricas
+12. worker-pool/     → todo junto en un componente de producción
 ```
