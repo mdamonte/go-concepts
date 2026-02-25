@@ -24,6 +24,7 @@ concurrency/
 ├── atomic/          — Int64, Bool, Value, Pointer, CAS, lock-free patterns
 ├── errors/          — sentinel, tipos custom, wrapping %w, Is/As, Join, panic vs error
 ├── generics/        — constraints, funciones genéricas, Stack/Queue/Set, patterns
+├── slices/          — header {ptr,len,cap}, append, 3-index, nil vs empty, operations
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -863,6 +864,95 @@ cd generics && go run .
 
 ---
 
+### [`slices/`](slices/README.md) — Slices internals & gotchas
+
+Un slice es un header `{ptr, len, cap}` que apunta a un backing array. La mayoría
+de los bugs y "trick questions" de entrevista vienen de no entender esto.
+
+```go
+// internals.go — header, backing array compartido, pass-by-value
+
+// sizeof([]int) = 24 bytes (ptr + len + cap, 3×8 en 64-bit)
+
+a := []int{1, 2, 3, 4, 5}
+b := a[1:4]   // comparte el backing array de a
+              // cap(b) = 4 (llega hasta el final de a, no sólo len(b)=3)
+
+b[0] = 99     // escribe en a[1] — a también lo ve
+fmt.Println(a) // [1 99 3 4 5]
+
+// El header se copia al pasar a función — el array se comparte
+func modifyElement(s []int, i, v int) { s[i] = v }   // ✓ caller lo ve
+func appendInside(s []int)             { s = append(s, 99) } // ✗ caller NO lo ve
+```
+
+```go
+// append.go — in-place vs reallocation, el gotcha más común
+
+// len < cap → escribe en el array existente (sin allocación)
+// len == cap → aloca nuevo array, copia todo
+
+// EL GOTCHA: append a un subslice puede sobreescribir el original
+orig := []int{1, 2, 3, 4, 5}
+sub  := orig[1:3]           // cap(sub) = 4 — llega hasta orig[4]
+sub   = append(sub, 99)     // cap permite → escribe en orig[3]!
+fmt.Println(orig)           // [1 2 3 99 5]  ← sobreescrito silenciosamente
+
+// Fix: slice de 3 índices — fuerza cap == len
+safe := orig[1:3:3]         // cap = 3-1 = 2 = len → append debe alocar
+safe  = append(safe, 99)    // nuevo backing array
+fmt.Println(orig)           // [1 2 3 4 5]  ← intacto
+```
+
+```go
+// operations.go — patrones de manipulación
+
+// copy: min(len(dst), len(src)) elementos; maneja overlap correctamente
+n := copy(dst, src)
+
+// Delete O(n) — preserva orden
+s = append(s[:i], s[i+1:]...)
+
+// Delete O(1) — cambia orden (swap con último)
+s[i] = s[len(s)-1]; s = s[:len(s)-1]
+
+// Insert en posición i
+s = append(s, 0); copy(s[i+1:], s[i:]); s[i] = v
+
+// Filter in-place — zero allocation, reutiliza el backing array
+result := s[:0]
+for _, v := range s { if keep(v) { result = append(result, v) } }
+
+// stdlib slices package (Go 1.21+)
+slices.Sort(s); slices.Contains(s, v); slices.Delete(s, i, j); slices.Compact(sorted)
+```
+
+```go
+// nil.go — nil vs empty slice
+
+var s []int        // nil slice  : s == nil → true
+s := []int{}       // empty slice: s == nil → false
+
+// Para range, len, cap, append: idénticos
+// Diferencia crítica: JSON
+json.Marshal(Resp{Items: nil})      // → {"items":null}
+json.Marshal(Resp{Items: []int{}})  // → {"items":[]}
+
+// reflect.DeepEqual los distingue
+reflect.DeepEqual([]int(nil), []int{}) // false
+
+// == solo es válido contra nil
+s == nil                // ✓
+// s == []int{1,2,3}   // ✗ compile error
+slices.Equal(a, b)      // ✓ comparación correcta (Go 1.21+)
+```
+
+```bash
+cd slices && go run .
+```
+
+---
+
 ### [`worker-pool/`](worker-pool/README.md) — Worker Pool (producción)
 
 Implementación lista para producción: shutdown graceful, propagación de context,
@@ -923,5 +1013,6 @@ go test -race ./workerpool/...   # tests con race detector
 9. atomic/           → operaciones atómicas y patrones lock-free
 10. errors/          → manejo de errores idiomático
 11. generics/        → parámetros de tipo, constraints y estructuras genéricas
-12. worker-pool/     → todo junto en un componente de producción
+12. slices/          → internals, append, gotchas y operaciones comunes
+13. worker-pool/     → todo junto en un componente de producción
 ```
