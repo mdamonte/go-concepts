@@ -27,6 +27,7 @@ concurrency/
 ├── slices/          — header {ptr,len,cap}, append, 3-index, nil vs empty, operations
 ├── http/            — Handler, ServeMux, middleware, client, shutdown graceful, httptest
 ├── profiling/       — CPU/heap/goroutine/block/mutex profiles, HTTP pprof, benchmarks
+├── defer/           — LIFO, arg eval, named returns, loops, panic & recover
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -1146,6 +1147,140 @@ cd profiling && go test -bench=. -benchmem
 
 ---
 
+### [`defer/`](defer/README.md) — defer
+
+`defer` es el mecanismo de Go para ejecutar una función justo antes de que la función que la contiene retorne. Es la fuente número 1 de "trick questions" en entrevistas técnicas de Go.
+
+```go
+// basics.go — LIFO, evaluación de argumentos, closures
+
+// LIFO: last registered, first executed
+defer fmt.Println("1") // runs last
+defer fmt.Println("2")
+defer fmt.Println("3") // runs first → 3, 2, 1
+
+// Argumentos evaluados al registrar el defer (no al ejecutar)
+x := 0
+defer fmt.Println(x)  // captura x=0 aquí
+x = 100               // no afecta al defer → imprime 0
+
+// Closure: lee la variable cuando ejecuta
+x := 0
+defer func() { fmt.Println(x) }()  // lee x cuando corre
+x = 100                              // → imprime 100
+
+// Trick question clásico:
+for i := range 3 {
+    defer fmt.Printf("%d\n", i) // arg eval: guarda 0,1,2; LIFO → 2,1,0
+}
+```
+
+```go
+// returns.go — named vs anonymous returns
+
+func anonymousReturn() int {
+    x := 5
+    defer func() { x *= 2 }() // modifica x local — el slot de retorno ya tiene 5
+    return x                   // caller recibe: 5
+}
+
+func namedReturn() (result int) {
+    defer func() { result *= 2 }() // modifica la variable de retorno
+    result = 5
+    return     // caller recibe: 10
+}
+
+// Práctica: wrappear todos los errores en un solo lugar
+func findRecord(id int) (err error) {
+    defer func() {
+        if err != nil {
+            err = fmt.Errorf("findRecord(%d): %w", id, err)
+        }
+    }()
+    // cada return temprano queda automáticamente wrapeado
+}
+
+// Transacciones: rollback on error, commit on nil
+func withTx(fn func(*tx) error) (err error) {
+    t, _ := beginTx()
+    defer func() {
+        if err != nil { t.Rollback() } else { err = t.Commit() }
+    }()
+    return fn(t)
+}
+```
+
+```go
+// loops.go — el bug más común de resource leak
+
+// WRONG: todos los Close() se ejecutan cuando retorna la función
+for i := range n {
+    r := openRes(i)
+    defer r.Close()  // ← se acumula; no cierra al final de cada iteración
+}
+
+// Fix 1: helper function (más idiomático)
+func processOne(id int) {
+    r := openRes(id)
+    defer r.Close() // se ejecuta cuando processOne retorna → cada iteración
+}
+
+// Fix 2: closure inmediatamente invocada
+for i := range n {
+    func() {
+        r := openRes(i)
+        defer r.Close()
+    }()
+}
+```
+
+```go
+// panic.go — cuatro reglas
+
+// Regla 1: defer corre durante el unwind de panic
+func f() (result string) {
+    defer func() { result = "defer ran" }() // ✓ se ejecuta aunque f hace panic
+    panic("oh no")
+}
+
+// Regla 2: recover() solo funciona en un defer DIRECTO
+defer func() {
+    if r := recover(); r != nil { /* ✓ funciona */ }
+}()
+defer recoverHelper() // ✗ recover() dentro del helper devuelve nil
+
+// Regla 3: tras recover(), la ejecución continúa después del defer — no después del panic()
+// Regla 4: os.Exit() NO ejecuta defers — log.Fatal también!
+
+// Re-panic para runtime.Error (bugs, no condiciones esperadas)
+defer func() {
+    if r := recover(); r != nil {
+        switch e := r.(type) {
+        case runtime.Error:
+            panic(e) // re-panic: no silenciar bugs
+        default:
+            err = fmt.Errorf("recovered: %v", r)
+        }
+    }
+}()
+
+// safeGo: cada goroutine debe recuperarse a sí misma
+func safeGo(fn func()) {
+    go func() {
+        defer func() {
+            if r := recover(); r != nil { log.Printf("recovered: %v", r) }
+        }()
+        fn()
+    }()
+}
+```
+
+```bash
+cd defer && go run .
+```
+
+---
+
 ### [`worker-pool/`](worker-pool/README.md) — Worker Pool (producción)
 
 Implementación lista para producción: shutdown graceful, propagación de context,
@@ -1209,5 +1344,6 @@ go test -race ./workerpool/...   # tests con race detector
 12. slices/          → internals, append, gotchas y operaciones comunes
 13. http/            → servidor, middleware, cliente, shutdown, httptest
 14. profiling/       → CPU/heap profiles, benchmarks, HTTP pprof
-15. worker-pool/     → todo junto en un componente de producción
+15. defer/           → LIFO, arg eval, named returns, loops, panic/recover
+16. worker-pool/     → todo junto en un componente de producción
 ```
