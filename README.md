@@ -25,6 +25,7 @@ concurrency/
 ├── errors/          — sentinel, tipos custom, wrapping %w, Is/As, Join, panic vs error
 ├── generics/        — constraints, funciones genéricas, Stack/Queue/Set, patterns
 ├── slices/          — header {ptr,len,cap}, append, 3-index, nil vs empty, operations
+├── http/            — Handler, ServeMux, middleware, client, shutdown graceful, httptest
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -953,6 +954,108 @@ cd slices && go run .
 
 ---
 
+### [`http/`](http/README.md) — net/http
+
+Patrones de servidor y cliente HTTP que se piden en entrevistas de backend.
+Todos los demos son autónomos — usan `httptest` internamente, sin necesidad de dos terminales.
+
+```go
+// server.go — Handler, HandlerFunc, ServeMux con Go 1.22 routing
+
+// http.Handler — la interfaz central: cualquier tipo con ServeHTTP lo satisface
+type greetHandler struct{ greeting string }
+func (h greetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) { ... }
+
+// Go 1.22: método + wildcard en patrón, r.PathValue para extraer {id}
+mux := http.NewServeMux()
+mux.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+    id := r.PathValue("id")
+    json.NewEncoder(w).Encode(map[string]any{"id": id})
+})
+mux.HandleFunc("/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintf(w, "file: %s", r.PathValue("path")) // catch-all wildcard
+})
+```
+
+```go
+// middleware.go — Logger, Auth, Recovery, Chain
+
+// Tipo canónico
+type Middleware func(http.Handler) http.Handler
+
+// Capturar status code: embeber ResponseWriter y sobreescribir WriteHeader
+type responseRecorder struct {
+    http.ResponseWriter
+    status int
+}
+func (r *responseRecorder) WriteHeader(code int) {
+    r.status = code; r.ResponseWriter.WriteHeader(code)
+}
+
+// Chain aplica de derecha a izquierda — el primero listado ejecuta primero
+// Chain(h, Logger, Auth(token), Recovery) → Logger(Auth(Recovery(h)))
+func Chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler {
+    for i := len(mws) - 1; i >= 0; i-- { h = mws[i](h) }
+    return h
+}
+```
+
+```go
+// client.go — siempre un cliente propio con Timeout
+
+// DefaultClient no tiene timeout — puede colgar para siempre
+client := &http.Client{Timeout: 5 * time.Second}
+
+// Non-2xx NO devuelve error — siempre verificar StatusCode
+resp, err := client.Get(url)
+// err solo indica error de transporte (DNS, TLS, timeout)
+if resp.StatusCode >= 400 { /* leer el body del error */ }
+defer resp.Body.Close() // siempre — necesario para reutilizar la conexión TCP
+
+// Context: NewRequestWithContext (no req.WithContext)
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+```
+
+```go
+// shutdown.go — graceful shutdown con signal.NotifyContext
+
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+go srv.ListenAndServe()  // en goroutine separada
+
+<-ctx.Done()             // espera SIGINT / SIGTERM
+
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+srv.Shutdown(shutdownCtx)  // drena requests en vuelo, luego para
+
+// ListenAndServe devuelve http.ErrServerClosed al terminar — NO es un error
+if err != nil && !errors.Is(err, http.ErrServerClosed) { log.Fatal(err) }
+```
+
+```go
+// recorder.go — httptest
+
+// NewRecorder: unit test de handler, sin red
+req := httptest.NewRequest("GET", "/users/42", nil)
+w   := httptest.NewRecorder()
+handler.ServeHTTP(w, req)
+// w.Code, w.Body.String(), w.Result().Header
+
+// NewServer: integración con TCP real (para probar http.Client)
+srv := httptest.NewServer(handler)
+defer srv.Close()
+http.Get(srv.URL + "/users/42")
+```
+
+```bash
+cd http && go run .
+```
+
+---
+
 ### [`worker-pool/`](worker-pool/README.md) — Worker Pool (producción)
 
 Implementación lista para producción: shutdown graceful, propagación de context,
@@ -1014,5 +1117,6 @@ go test -race ./workerpool/...   # tests con race detector
 10. errors/          → manejo de errores idiomático
 11. generics/        → parámetros de tipo, constraints y estructuras genéricas
 12. slices/          → internals, append, gotchas y operaciones comunes
-13. worker-pool/     → todo junto en un componente de producción
+13. http/            → servidor, middleware, cliente, shutdown, httptest
+14. worker-pool/     → todo junto en un componente de producción
 ```
