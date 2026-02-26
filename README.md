@@ -26,6 +26,7 @@ concurrency/
 ├── generics/        — constraints, funciones genéricas, Stack/Queue/Set, patterns
 ├── slices/          — header {ptr,len,cap}, append, 3-index, nil vs empty, operations
 ├── http/            — Handler, ServeMux, middleware, client, shutdown graceful, httptest
+├── profiling/       — CPU/heap/goroutine/block/mutex profiles, HTTP pprof, benchmarks
 │
 └── worker-pool/     — worker pool de producción con shutdown graceful y métricas
 ```
@@ -1056,6 +1057,95 @@ cd http && go run .
 
 ---
 
+### [`profiling/`](profiling/README.md) — Profiling & Benchmarks
+
+CPU, heap, goroutine, block y mutex profiles con `runtime/pprof`. Endpoints HTTP siempre activos con `net/http/pprof`. Benchmarks con `testing.B`.
+
+```go
+// cpu.go — StartCPUProfile / StopCPUProfile
+
+f, _ := os.Create("cpu.prof")
+pprof.StartCPUProfile(f)
+// ... workload ...
+pprof.StopCPUProfile()  // flush — siempre llamar antes de leer el archivo
+
+// go tool pprof cpu.prof
+// (pprof) top -flat    → tiempo propio por función
+// (pprof) list foo     → fuente anotada
+// (pprof) web          → flame graph
+```
+
+```go
+// memory.go — WriteHeapProfile, patrones de allocación
+
+runtime.GC()               // GC antes → inuse_space muestra solo objetos vivos
+pprof.WriteHeapProfile(f)
+
+// Reducir allocaciones:
+// string +=       200 iters → 200 allocs   (nueva string en cada concat)
+// strings.Builder 200 iters →   7 allocs   (buffer interno)
+// Builder + Grow  200 iters →   2 allocs   (una allocación inicial)
+//
+// append sin cap  1000 ints →  13 allocs   (múltiples doublings)
+// make([]int,0,n) 1000 ints →   2 allocs   (una sola allocación)
+```
+
+```go
+// profiles.go — named profiles via pprof.Lookup
+
+// Block y mutex están OFF por defecto — activar antes de perfilar:
+runtime.SetBlockProfileRate(1)      // captura cada evento de bloqueo
+runtime.SetMutexProfileFraction(1)  // captura cada contención de mutex
+
+pprof.Lookup("goroutine").WriteTo(f, 0)  // binario para go tool pprof
+pprof.Lookup("block").WriteTo(f, 0)
+pprof.Lookup("mutex").WriteTo(f, 0)
+```
+
+```go
+// http_pprof.go — endpoints siempre activos
+
+import _ "net/http/pprof"  // blank import registra rutas en DefaultServeMux
+
+// Producción: puerto separado, solo localhost
+go func() {
+    http.ListenAndServe("localhost:6060", nil)
+}()
+
+// go tool pprof http://localhost:6060/debug/pprof/heap
+// go tool pprof -http=:8080 http://localhost:6060/debug/pprof/heap  → UI web
+```
+
+```go
+// bench_test.go — testing.B
+
+func BenchmarkFoo(b *testing.B) {
+    data := setup()
+    b.ResetTimer()           // excluir setup del tiempo medido
+
+    for range b.N {          // b.N ajustado automáticamente hasta ~1 segundo
+        process(data)
+    }
+}
+
+func BenchmarkParallel(b *testing.B) {
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() { process() }
+    })
+}
+
+// go test -bench=. -benchmem                    → ns/op, B/op, allocs/op
+// go test -bench=. -count=10 > old.txt          → para benchstat
+// go test -bench=. -cpuprofile=bench_cpu.prof   → + perfil CPU
+```
+
+```bash
+cd profiling && go run .
+cd profiling && go test -bench=. -benchmem
+```
+
+---
+
 ### [`worker-pool/`](worker-pool/README.md) — Worker Pool (producción)
 
 Implementación lista para producción: shutdown graceful, propagación de context,
@@ -1118,5 +1208,6 @@ go test -race ./workerpool/...   # tests con race detector
 11. generics/        → parámetros de tipo, constraints y estructuras genéricas
 12. slices/          → internals, append, gotchas y operaciones comunes
 13. http/            → servidor, middleware, cliente, shutdown, httptest
-14. worker-pool/     → todo junto en un componente de producción
+14. profiling/       → CPU/heap profiles, benchmarks, HTTP pprof
+15. worker-pool/     → todo junto en un componente de producción
 ```
